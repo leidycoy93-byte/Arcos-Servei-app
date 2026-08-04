@@ -1,0 +1,49 @@
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const low = require('lowdb');
+const FileSync = require('lowdb/adapters/FileSync');
+const { v4: uuidv4 } = require('uuid');
+
+const adapter = new FileSync(path.join(__dirname, 'data', 'db.json'));
+const db = low(adapter);
+
+db.defaults({
+    users: [],
+        clients: [],
+            services: [],
+                timeEntries: []
+}).write();
+
+// Seed default admin + example data on first run
+if (db.get('users').size().value() === 0) {
+    db.get('users')
+          .push({
+                  id: uuidv4(),
+                  username: 'admin',
+                  passwordHash: bcrypt.hashSync('admin123', 8),
+                  role: 'admin',
+                  name: 'Administrador',
+                  active: true,
+                  createdAt: new Date().toISOString()
+          })
+          .write();
+}
+
+if (db.get('services').size().value() === 0) {
+    const defaultServices = [
+          'Albañilería',
+          'Electricidad',
+          'Plomería',
+          'Pintura',
+          'Estructura / Hierro',
+          'Acabados',
+          'Supervisión'
+        ];
+    defaultServices.forEach((name) => {
+          db.get('services')
+                  .push({ id: uuidv4(), name, hourlyRate: null, active: true })
+                  .write();
+    });
+}
+
+module.exports = { db, uuidv4 };
