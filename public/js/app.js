@@ -1,0 +1,889 @@
+/* Arcos Serveis - frontend SPA (vanilla JS) */
+
+const LOGO_SVG = `
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Arcos Serveis">
+  <path d="M 96 24 A 38 38 0 1 1 57 14" fill="none" stroke="#e2231c" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="79" cy="33" r="7" fill="#171717"/>
+  <circle cx="91" cy="41" r="5" fill="#171717"/>
+  <circle cx="69" cy="25" r="4" fill="#171717"/>
+  <circle cx="86" cy="54" r="4" fill="#171717"/>
+  <circle cx="96" cy="53" r="3" fill="#171717"/>
+  <polygon points="45,55 62,39 79,55" fill="#171717"/>
+  <rect x="49" y="55" width="26" height="25" fill="#171717"/>
+  <rect x="58" y="64" width="8" height="8" fill="#fcfcfb"/>
+  <path d="M18 90 Q33 80 48 90 T78 90 T104 90" fill="none" stroke="#171717" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M18 97 Q33 87 48 97 T78 97 T104 97" fill="none" stroke="#e2231c" stroke-width="2.5" stroke-linecap="round"/>
+</svg>`;
+
+const BRAND_NAME_HTML = '<span class="n-arcos">ARCOS</span> <span class="n-serveis">SERVEIS</span>';
+
+const App = {
+  root: document.getElementById('app'),
+  state: {
+    user: null,
+    tab: null,
+    clients: [],
+    services: [],
+    employees: [],
+    currentEntry: null,
+    timerInterval: null,
+    lastCoords: null,
+    gpsStatus: 'pending' // pending | ok | bad
+  }
+};
+
+// ---------------- API helper ----------------
+async function api(method, url, body) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include'
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* no body */ }
+  if (!res.ok) {
+    throw new Error((data && data.error) || `Error ${res.status}`);
+  }
+  return data;
+}
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toISOString().slice(0, 10);
+}
+function fmtHours(h) {
+  if (h == null) return '—';
+  return h.toFixed(2) + ' h';
+}
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------------- Boot ----------------
+async function boot() {
+  try {
+    const { user } = await api('GET', '/api/me');
+    App.state.user = user;
+    await loadReferenceData();
+    App.state.tab = user.role === 'admin' ? 'registro' : 'jornada';
+    renderShell();
+  } catch (e) {
+    renderLogin();
+  }
+}
+
+async function loadReferenceData() {
+  const [clients, services] = await Promise.all([
+    api('GET', '/api/clients'),
+    api('GET', '/api/services')
+  ]);
+  App.state.clients = clients;
+  App.state.services = services;
+  if (App.state.user.role === 'admin') {
+    App.state.employees = await api('GET', '/api/employees');
+  }
+}
+
+// ---------------- Login ----------------
+function renderLogin() {
+  App.root.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card">
+        <div class="brand-mark">
+          <div class="icon">${LOGO_SVG}</div>
+          <div class="name">${BRAND_NAME_HTML}</div>
+        </div>
+        <h1>Iniciar sesión</h1>
+        <p class="sub">Control d'hores, clients i ubicació GPS</p>
+        <form id="login-form">
+          <label>Usuario</label>
+          <input type="text" id="login-username" autocomplete="username" required />
+          <label>Contraseña</label>
+          <input type="password" id="login-password" autocomplete="current-password" required />
+          <div class="form-row-actions" style="margin-top:20px;">
+            <button type="submit" class="btn">Entrar</button>
+          </div>
+        </form>
+        <div id="login-error"></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errBox = document.getElementById('login-error');
+    errBox.innerHTML = '';
+    try {
+      const { user } = await api('POST', '/api/login', { username, password });
+      App.state.user = user;
+      await loadReferenceData();
+      App.state.tab = user.role === 'admin' ? 'registro' : 'jornada';
+      renderShell();
+    } catch (err) {
+      errBox.innerHTML = `<div class="error-msg">${escapeHtml(err.message)}</div>`;
+    }
+  });
+}
+
+// ---------------- Shell ----------------
+function tabsForRole(role) {
+  if (role === 'admin') {
+    return [
+      ['jornada', 'Mi jornada'],
+      ['registro', 'Registro de horas'],
+      ['resumen', 'Resumen'],
+      ['clientes', 'Clientes'],
+      ['servicios', 'Servicios'],
+      ['empleados', 'Empleados']
+    ];
+  }
+  return [
+    ['jornada', 'Mi jornada'],
+    ['historial', 'Mi historial']
+  ];
+}
+
+function renderShell() {
+  const u = App.state.user;
+  const tabs = tabsForRole(u.role);
+  App.root.innerHTML = `
+    <div class="topbar">
+      <div class="brand-mark">
+        <div class="icon">${LOGO_SVG}</div>
+        <div class="name">${BRAND_NAME_HTML}</div>
+      </div>
+      <div class="who">
+        <div>${escapeHtml(u.name)} <span class="badge ${u.role}">${u.role === 'admin' ? 'Admin' : 'Empleado'}</span></div>
+        <button id="logout-btn">Cerrar sesión</button>
+      </div>
+    </div>
+    <div class="tabs">
+      ${tabs.map(([id, label]) => `<button data-tab="${id}" class="${App.state.tab === id ? 'active' : ''}">${label}</button>`).join('')}
+    </div>
+    <main class="view" id="view"></main>
+  `;
+  document.getElementById('logout-btn').addEventListener('click', async () => {
+    await api('POST', '/api/logout');
+    stopTimerLoop();
+    App.state.user = null;
+    renderLogin();
+  });
+  document.querySelectorAll('.tabs button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      App.state.tab = btn.dataset.tab;
+      renderShell();
+    });
+  });
+  renderView();
+}
+
+function renderView() {
+  const view = document.getElementById('view');
+  switch (App.state.tab) {
+    case 'jornada': return renderJornada(view);
+    case 'historial': return renderHistorial(view);
+    case 'registro': return renderRegistroAdmin(view);
+    case 'resumen': return renderResumen(view);
+    case 'clientes': return renderClientes(view);
+    case 'servicios': return renderServicios(view);
+    case 'empleados': return renderEmpleados(view);
+    default: view.innerHTML = '';
+  }
+}
+
+// ---------------- Mi jornada (clock in/out) ----------------
+function stopTimerLoop() {
+  if (App.state.timerInterval) {
+    clearInterval(App.state.timerInterval);
+    App.state.timerInterval = null;
+  }
+}
+
+function getGps() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      App.state.gpsStatus = 'bad';
+      return resolve(null);
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        App.state.gpsStatus = 'ok';
+        App.state.lastCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        resolve(App.state.lastCoords);
+      },
+      () => {
+        App.state.gpsStatus = 'bad';
+        resolve(null);
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+    );
+  });
+}
+
+async function renderJornada(view) {
+  view.innerHTML = `<h2 class="view-title">Mi jornada</h2><div class="card">Cargando…</div>`;
+  getGps(); // kick off in background to warm up permission prompt
+  let current = null;
+  try {
+    current = await api('GET', '/api/time-entries/current');
+  } catch (e) { /* ignore */ }
+  App.state.currentEntry = current;
+
+  const clientOptions = App.state.clients.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  const serviceOptions = App.state.services.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+
+  view.innerHTML = `
+    <h2 class="view-title">Mi jornada</h2>
+    <div class="card">
+      <div class="timer" id="timer-display">00:00:00</div>
+      <div class="timer-status" id="timer-status"></div>
+      ${current ? renderClockOutForm(current) : renderClockInForm(clientOptions, serviceOptions)}
+      <div class="gps-status">
+        <span class="gps-dot" id="gps-dot"></span>
+        <span id="gps-text">Obteniendo ubicación…</span>
+      </div>
+    </div>
+  `;
+  updateGpsIndicator();
+  stopTimerLoop();
+  if (current) {
+    document.getElementById('timer-status').textContent =
+      `Cliente: ${current.clientName} · Servicio: ${current.serviceName} · Inicio: ${fmtDateTime(current.startTime)}`;
+    const startMs = new Date(current.startTime).getTime();
+    const tick = () => {
+      const diff = Date.now() - startMs;
+      document.getElementById('timer-display').textContent = formatDuration(diff);
+    };
+    tick();
+    App.state.timerInterval = setInterval(tick, 1000);
+    document.getElementById('clock-out-btn').addEventListener('click', () => doClockOut(current.id));
+  } else {
+    document.getElementById('timer-status').textContent = 'Sin jornada activa';
+    document.getElementById('clock-in-form').addEventListener('submit', doClockIn);
+  }
+
+  // poll gps status text periodically
+  const gpsInterval = setInterval(updateGpsIndicator, 1000);
+  setTimeout(() => clearInterval(gpsInterval), 12000);
+}
+
+function updateGpsIndicator() {
+  const dot = document.getElementById('gps-dot');
+  const text = document.getElementById('gps-text');
+  if (!dot || !text) return;
+  if (App.state.gpsStatus === 'ok') {
+    dot.className = 'gps-dot ok';
+    text.textContent = `GPS activo (${App.state.lastCoords.lat.toFixed(5)}, ${App.state.lastCoords.lng.toFixed(5)})`;
+  } else if (App.state.gpsStatus === 'bad') {
+    dot.className = 'gps-dot bad';
+    text.textContent = 'Sin acceso a GPS — activa la ubicación en tu navegador';
+  } else {
+    dot.className = 'gps-dot';
+    text.textContent = 'Obteniendo ubicación…';
+  }
+}
+
+function renderClockInForm(clientOptions, serviceOptions) {
+  return `
+    <form id="clock-in-form">
+      <label>Cliente</label>
+      <select id="in-client" required><option value="">Selecciona un cliente…</option>${clientOptions}</select>
+      <label>Servicio</label>
+      <select id="in-service" required><option value="">Selecciona un servicio…</option>${serviceOptions}</select>
+      <label>Notas (opcional)</label>
+      <textarea id="in-notes" placeholder="Detalles del trabajo…"></textarea>
+      <div class="form-row-actions">
+        <button type="submit" class="btn" style="width:100%">Marcar entrada</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderClockOutForm(current) {
+  return `
+    <label>Notas de salida (opcional)</label>
+    <textarea id="out-notes" placeholder="Detalles del trabajo…"></textarea>
+    <div class="form-row-actions">
+      <button id="clock-out-btn" class="btn stop" style="width:100%">Marcar salida</button>
+    </div>
+  `;
+}
+
+function formatDuration(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+  const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+  const s = String(totalSec % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+async function doClockIn(e) {
+  e.preventDefault();
+  const clientId = document.getElementById('in-client').value;
+  const serviceId = document.getElementById('in-service').value;
+  const notes = document.getElementById('in-notes').value;
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = 'Obteniendo GPS…';
+  const coords = await getGps();
+  try {
+    await api('POST', '/api/time-entries/clock-in', {
+      clientId, serviceId, notes,
+      lat: coords ? coords.lat : null,
+      lng: coords ? coords.lng : null
+    });
+    toast('Entrada registrada');
+    renderView();
+  } catch (err) {
+    toast(err.message);
+    btn.disabled = false;
+    btn.textContent = 'Marcar entrada';
+  }
+}
+
+async function doClockOut(entryId) {
+  const notes = document.getElementById('out-notes').value;
+  const btn = document.getElementById('clock-out-btn');
+  btn.disabled = true;
+  btn.textContent = 'Obteniendo GPS…';
+  const coords = await getGps();
+  try {
+    await api('POST', `/api/time-entries/${entryId}/clock-out`, {
+      notes,
+      lat: coords ? coords.lat : null,
+      lng: coords ? coords.lng : null
+    });
+    toast('Salida registrada');
+    stopTimerLoop();
+    renderView();
+  } catch (err) {
+    toast(err.message);
+    btn.disabled = false;
+    btn.textContent = 'Marcar salida';
+  }
+}
+
+// ---------------- Mi historial (employee) ----------------
+async function renderHistorial(view) {
+  view.innerHTML = `<h2 class="view-title">Mi historial</h2><div class="card">Cargando…</div>`;
+  const entries = await api('GET', '/api/time-entries/mine');
+  if (!entries.length) {
+    view.innerHTML = `<h2 class="view-title">Mi historial</h2><div class="card"><div class="empty-state">Todavía no tienes registros de horas.</div></div>`;
+    return;
+  }
+  view.innerHTML = `
+    <h2 class="view-title">Mi historial</h2>
+    <div class="card table-scroll">
+      <table>
+        <thead><tr><th>Fecha</th><th>Cliente</th><th>Servicio</th><th>Entrada</th><th>Salida</th><th>Horas</th><th>Estado</th></tr></thead>
+        <tbody>
+          ${entries.map((e) => `
+            <tr>
+              <td>${fmtDate(e.startTime)}</td>
+              <td>${escapeHtml(e.clientName)}</td>
+              <td>${escapeHtml(e.serviceName)}</td>
+              <td>${fmtDateTime(e.startTime)}</td>
+              <td>${e.endTime ? fmtDateTime(e.endTime) : '—'}</td>
+              <td>${fmtHours(e.hours)}</td>
+              <td><span class="badge ${e.status}">${e.status === 'open' ? 'En curso' : 'Cerrado'}</span></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ---------------- Registro de horas (admin) ----------------
+let mapInstance = null;
+
+async function renderRegistroAdmin(view) {
+  view.innerHTML = `<h2 class="view-title">Registro de horas</h2><div class="card">Cargando…</div>`;
+  renderRegistroFiltersAndTable(view);
+}
+
+async function renderRegistroFiltersAndTable(view, filters = {}) {
+  const empOptions = App.state.employees.map((u) => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('');
+  const cliOptions = App.state.clients.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  const svcOptions = App.state.services.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+
+  const qs = new URLSearchParams(filters).toString();
+  const entries = await api('GET', '/api/time-entries' + (qs ? '?' + qs : ''));
+
+  view.innerHTML = `
+    <div class="toolbar"><h2>Registro de horas</h2></div>
+    <div class="card">
+      <div class="filters">
+        <div><label>Empleado</label><select id="f-employee"><option value="">Todos</option>${empOptions}</select></div>
+        <div><label>Cliente</label><select id="f-client"><option value="">Todos</option>${cliOptions}</select></div>
+        <div><label>Servicio</label><select id="f-service"><option value="">Todos</option>${svcOptions}</select></div>
+        <div><label>Estado</label><select id="f-status"><option value="">Todos</option><option value="open">En curso</option><option value="closed">Cerrado</option></select></div>
+        <div><label>Desde</label><input type="date" id="f-from" /></div>
+        <div><label>Hasta</label><input type="date" id="f-to" /></div>
+      </div>
+      <button class="btn small" id="apply-filters">Filtrar</button>
+    </div>
+    <div id="map"></div>
+    <div class="card table-scroll">
+      ${entries.length ? `
+      <table>
+        <thead><tr><th>Empleado</th><th>Cliente</th><th>Servicio</th><th>Entrada</th><th>Salida</th><th>Horas</th><th>Estado</th></tr></thead>
+        <tbody>
+          ${entries.map((e) => `
+            <tr>
+              <td>${escapeHtml(e.employeeName)}</td>
+              <td>${escapeHtml(e.clientName)}</td>
+              <td>${escapeHtml(e.serviceName)}</td>
+              <td>${fmtDateTime(e.startTime)}</td>
+              <td>${e.endTime ? fmtDateTime(e.endTime) : '—'}</td>
+              <td>${fmtHours(e.hours)}</td>
+              <td><span class="badge ${e.status}">${e.status === 'open' ? 'En curso' : 'Cerrado'}</span></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>` : `<div class="empty-state">No hay registros con estos filtros.</div>`}
+    </div>
+  `;
+
+  // Restore filter values
+  Object.entries(filters).forEach(([k, v]) => {
+    const map = { employeeId: 'f-employee', clientId: 'f-client', serviceId: 'f-service', status: 'f-status', from: 'f-from', to: 'f-to' };
+    const el = document.getElementById(map[k]);
+    if (el) el.value = v;
+  });
+
+  document.getElementById('apply-filters').addEventListener('click', () => {
+    const newFilters = {};
+    const employeeId = document.getElementById('f-employee').value;
+    const clientId = document.getElementById('f-client').value;
+    const serviceId = document.getElementById('f-service').value;
+    const status = document.getElementById('f-status').value;
+    const from = document.getElementById('f-from').value;
+    const to = document.getElementById('f-to').value;
+    if (employeeId) newFilters.employeeId = employeeId;
+    if (clientId) newFilters.clientId = clientId;
+    if (serviceId) newFilters.serviceId = serviceId;
+    if (status) newFilters.status = status;
+    if (from) newFilters.from = from;
+    if (to) newFilters.to = to;
+    renderRegistroFiltersAndTable(view, newFilters);
+  });
+
+  renderMap(entries);
+}
+
+function renderMap(entries) {
+  const points = [];
+  entries.forEach((e) => {
+    if (e.startLat != null && e.startLng != null) points.push({ lat: e.startLat, lng: e.startLng, label: `${e.employeeName} · Entrada · ${e.clientName}`, kind: 'start' });
+    if (e.endLat != null && e.endLng != null) points.push({ lat: e.endLat, lng: e.endLng, label: `${e.employeeName} · Salida · ${e.clientName}`, kind: 'end' });
+  });
+
+  const mapEl = document.getElementById('map');
+  if (!mapEl) return;
+
+  if (mapInstance) {
+    mapInstance.remove();
+    mapInstance = null;
+  }
+
+  if (!points.length) {
+    mapEl.innerHTML = '<div class="empty-state" style="padding-top:120px;">Sin coordenadas GPS para mostrar todavía.</div>';
+    return;
+  }
+
+  mapInstance = L.map('map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(mapInstance);
+
+  const bounds = [];
+  points.forEach((p) => {
+    const color = p.kind === 'start' ? '#0ca30c' : '#d03b3b';
+    L.circleMarker([p.lat, p.lng], { radius: 7, color, fillColor: color, fillOpacity: 0.85, weight: 1 })
+      .addTo(mapInstance)
+      .bindPopup(escapeHtml(p.label));
+    bounds.push([p.lat, p.lng]);
+  });
+  mapInstance.fitBounds(bounds, { padding: [30, 30] });
+  if (points.length === 1) mapInstance.setZoom(15);
+}
+
+// ---------------- Resumen (admin) ----------------
+async function renderResumen(view, filters = {}) {
+  const empOptions = App.state.employees.map((u) => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('');
+  const cliOptions = App.state.clients.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  const svcOptions = App.state.services.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+
+  const qs = new URLSearchParams(filters).toString();
+  const summary = await api('GET', '/api/summary' + (qs ? '?' + qs : ''));
+
+  const maxEmp = Math.max(1, ...Object.values(summary.byEmployee));
+
+  view.innerHTML = `
+    <div class="toolbar"><h2>Resumen de horas</h2>
+      <a class="btn small secondary" id="export-csv" href="/api/summary/export.csv${qs ? '?' + qs : ''}">Exportar CSV</a>
+    </div>
+    <div class="card">
+      <div class="filters">
+        <div><label>Empleado</label><select id="f-employee"><option value="">Todos</option>${empOptions}</select></div>
+        <div><label>Cliente</label><select id="f-client"><option value="">Todos</option>${cliOptions}</select></div>
+        <div><label>Servicio</label><select id="f-service"><option value="">Todos</option>${svcOptions}</select></div>
+        <div><label>Desde</label><input type="date" id="f-from" /></div>
+        <div><label>Hasta</label><input type="date" id="f-to" /></div>
+      </div>
+      <button class="btn small" id="apply-filters">Filtrar</button>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat-tile"><div class="label">Total horas</div><div class="value">${summary.totalHours}</div></div>
+      <div class="stat-tile"><div class="label">Jornadas cerradas</div><div class="value">${summary.entryCount}</div></div>
+      <div class="stat-tile"><div class="label">Empleados con horas</div><div class="value">${Object.keys(summary.byEmployee).length}</div></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;font-size:14px;">Horas por empleado</h3>
+      ${Object.keys(summary.byEmployee).length ? `
+      <div class="bar-chart">
+        ${Object.entries(summary.byEmployee).sort((a, b) => b[1] - a[1]).map(([name, hours]) => `
+          <div class="bar-row">
+            <div class="bar-label" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(hours / maxEmp * 100).toFixed(1)}%"></div></div>
+            <div class="bar-value">${hours} h</div>
+          </div>
+        `).join('')}
+      </div>` : `<div class="empty-state">Sin datos en este rango.</div>`}
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3 style="margin-top:0;font-size:14px;">Horas por cliente</h3>
+        ${renderMiniTable(summary.byClient)}
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;font-size:14px;">Horas por servicio</h3>
+        ${renderMiniTable(summary.byService)}
+      </div>
+    </div>
+
+    <div class="card table-scroll">
+      <h3 style="margin-top:0;font-size:14px;">Detalle (empleado · cliente · servicio)</h3>
+      ${summary.detail.length ? `
+      <table>
+        <thead><tr><th>Empleado</th><th>Cliente</th><th>Servicio</th><th>Horas</th></tr></thead>
+        <tbody>
+          ${summary.detail.sort((a, b) => b.hours - a.hours).map((row) => `
+            <tr><td>${escapeHtml(row.employee)}</td><td>${escapeHtml(row.client)}</td><td>${escapeHtml(row.service)}</td><td>${fmtHours(row.hours)}</td></tr>
+          `).join('')}
+        </tbody>
+      </table>` : `<div class="empty-state">Sin datos en este rango.</div>`}
+    </div>
+  `;
+
+  Object.entries(filters).forEach(([k, v]) => {
+    const map = { employeeId: 'f-employee', clientId: 'f-client', serviceId: 'f-service', from: 'f-from', to: 'f-to' };
+    const el = document.getElementById(map[k]);
+    if (el) el.value = v;
+  });
+
+  document.getElementById('apply-filters').addEventListener('click', () => {
+    const newFilters = {};
+    const employeeId = document.getElementById('f-employee').value;
+    const clientId = document.getElementById('f-client').value;
+    const serviceId = document.getElementById('f-service').value;
+    const from = document.getElementById('f-from').value;
+    const to = document.getElementById('f-to').value;
+    if (employeeId) newFilters.employeeId = employeeId;
+    if (clientId) newFilters.clientId = clientId;
+    if (serviceId) newFilters.serviceId = serviceId;
+    if (from) newFilters.from = from;
+    if (to) newFilters.to = to;
+    renderResumen(view, newFilters);
+  });
+}
+
+function renderMiniTable(obj) {
+  const entries = Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return '<div class="empty-state">Sin datos.</div>';
+  return `<table>${entries.map(([name, hours]) => `<tr><td>${escapeHtml(name)}</td><td style="text-align:right;">${hours} h</td></tr>`).join('')}</table>`;
+}
+
+// ---------------- Clientes (admin CRUD) ----------------
+async function renderClientes(view) {
+  const clients = await api('GET', '/api/clients');
+  App.state.clients = clients;
+  view.innerHTML = `
+    <div class="toolbar"><h2>Clientes</h2><button class="btn small" id="new-client">+ Nuevo cliente</button></div>
+    <div class="card table-scroll">
+      ${clients.length ? `
+      <table>
+        <thead><tr><th>Nombre</th><th>Dirección</th><th>Contacto</th><th>Estado</th><th></th></tr></thead>
+        <tbody>
+          ${clients.map((c) => `
+            <tr>
+              <td>${escapeHtml(c.name)}</td>
+              <td>${escapeHtml(c.address)}</td>
+              <td>${escapeHtml(c.contact)}</td>
+              <td><span class="badge ${c.active ? 'closed' : 'open'}">${c.active ? 'Activo' : 'Inactivo'}</span></td>
+              <td class="row-actions">
+                <button class="icon-btn" data-edit="${c.id}">Editar</button>
+                ${c.active ? `<button class="icon-btn danger-text" data-deactivate="${c.id}">Desactivar</button>` : ''}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>` : `<div class="empty-state">No hay clientes todavía.</div>`}
+    </div>
+  `;
+  document.getElementById('new-client').addEventListener('click', () => openClientModal());
+  clients.forEach((c) => {
+    const editBtn = view.querySelector(`[data-edit="${c.id}"]`);
+    if (editBtn) editBtn.addEventListener('click', () => openClientModal(c));
+    const deactBtn = view.querySelector(`[data-deactivate="${c.id}"]`);
+    if (deactBtn) deactBtn.addEventListener('click', async () => {
+      if (!confirm(`¿Desactivar al cliente "${c.name}"?`)) return;
+      await api('DELETE', `/api/clients/${c.id}`);
+      toast('Cliente desactivado');
+      renderClientes(view);
+    });
+  });
+}
+
+function openClientModal(client) {
+  const isEdit = !!client;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal">
+      <h3>${isEdit ? 'Editar cliente' : 'Nuevo cliente'}</h3>
+      <form id="client-form">
+        <label>Nombre</label>
+        <input type="text" id="c-name" required value="${client ? escapeHtml(client.name) : ''}" />
+        <label>Dirección</label>
+        <input type="text" id="c-address" value="${client ? escapeHtml(client.address) : ''}" />
+        <label>Contacto (teléfono/email)</label>
+        <input type="text" id="c-contact" value="${client ? escapeHtml(client.contact) : ''}" />
+        <label>Notas</label>
+        <textarea id="c-notes">${client ? escapeHtml(client.notes) : ''}</textarea>
+        <div class="form-row-actions">
+          <button type="button" class="btn secondary" id="cancel-modal" style="width:50%">Cancelar</button>
+          <button type="submit" class="btn" style="width:50%">Guardar</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#cancel-modal').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#client-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      name: document.getElementById('c-name').value.trim(),
+      address: document.getElementById('c-address').value.trim(),
+      contact: document.getElementById('c-contact').value.trim(),
+      notes: document.getElementById('c-notes').value.trim()
+    };
+    try {
+      if (isEdit) await api('PUT', `/api/clients/${client.id}`, payload);
+      else await api('POST', '/api/clients', payload);
+      backdrop.remove();
+      toast('Cliente guardado');
+      renderClientes(document.getElementById('view'));
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
+// ---------------- Servicios (admin CRUD) ----------------
+async function renderServicios(view) {
+  const services = await api('GET', '/api/services');
+  App.state.services = services;
+  view.innerHTML = `
+    <div class="toolbar"><h2>Servicios</h2><button class="btn small" id="new-service">+ Nuevo servicio</button></div>
+    <div class="card table-scroll">
+      ${services.length ? `
+      <table>
+        <thead><tr><th>Nombre</th><th>Tarifa/hora</th><th>Estado</th><th></th></tr></thead>
+        <tbody>
+          ${services.map((s) => `
+            <tr>
+              <td>${escapeHtml(s.name)}</td>
+              <td>${s.hourlyRate != null ? s.hourlyRate : '—'}</td>
+              <td><span class="badge ${s.active ? 'closed' : 'open'}">${s.active ? 'Activo' : 'Inactivo'}</span></td>
+              <td class="row-actions">
+                <button class="icon-btn" data-edit="${s.id}">Editar</button>
+                ${s.active ? `<button class="icon-btn danger-text" data-deactivate="${s.id}">Desactivar</button>` : ''}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>` : `<div class="empty-state">No hay servicios todavía.</div>`}
+    </div>
+  `;
+  document.getElementById('new-service').addEventListener('click', () => openServiceModal());
+  services.forEach((s) => {
+    const editBtn = view.querySelector(`[data-edit="${s.id}"]`);
+    if (editBtn) editBtn.addEventListener('click', () => openServiceModal(s));
+    const deactBtn = view.querySelector(`[data-deactivate="${s.id}"]`);
+    if (deactBtn) deactBtn.addEventListener('click', async () => {
+      if (!confirm(`¿Desactivar el servicio "${s.name}"?`)) return;
+      await api('DELETE', `/api/services/${s.id}`);
+      toast('Servicio desactivado');
+      renderServicios(view);
+    });
+  });
+}
+
+function openServiceModal(service) {
+  const isEdit = !!service;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal">
+      <h3>${isEdit ? 'Editar servicio' : 'Nuevo servicio'}</h3>
+      <form id="service-form">
+        <label>Nombre</label>
+        <input type="text" id="s-name" required value="${service ? escapeHtml(service.name) : ''}" />
+        <label>Tarifa por hora (opcional)</label>
+        <input type="number" step="0.01" id="s-rate" value="${service && service.hourlyRate != null ? service.hourlyRate : ''}" />
+        <div class="form-row-actions">
+          <button type="button" class="btn secondary" id="cancel-modal" style="width:50%">Cancelar</button>
+          <button type="submit" class="btn" style="width:50%">Guardar</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#cancel-modal').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#service-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      name: document.getElementById('s-name').value.trim(),
+      hourlyRate: document.getElementById('s-rate').value
+    };
+    try {
+      if (isEdit) await api('PUT', `/api/services/${service.id}`, payload);
+      else await api('POST', '/api/services', payload);
+      backdrop.remove();
+      toast('Servicio guardado');
+      renderServicios(document.getElementById('view'));
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
+// ---------------- Empleados (admin CRUD) ----------------
+async function renderEmpleados(view) {
+  const employees = await api('GET', '/api/employees');
+  App.state.employees = employees;
+  view.innerHTML = `
+    <div class="toolbar"><h2>Empleados</h2><button class="btn small" id="new-employee">+ Nuevo empleado</button></div>
+    <div class="card table-scroll">
+      <table>
+        <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th></th></tr></thead>
+        <tbody>
+          ${employees.map((u) => `
+            <tr>
+              <td>${escapeHtml(u.name)}</td>
+              <td>${escapeHtml(u.username)}</td>
+              <td><span class="badge ${u.role}">${u.role === 'admin' ? 'Admin' : 'Empleado'}</span></td>
+              <td><span class="badge ${u.active ? 'closed' : 'open'}">${u.active ? 'Activo' : 'Inactivo'}</span></td>
+              <td class="row-actions">
+                <button class="icon-btn" data-edit="${u.id}">Editar</button>
+                ${u.active && u.id !== App.state.user.id ? `<button class="icon-btn danger-text" data-deactivate="${u.id}">Desactivar</button>` : ''}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  document.getElementById('new-employee').addEventListener('click', () => openEmployeeModal());
+  employees.forEach((u) => {
+    const editBtn = view.querySelector(`[data-edit="${u.id}"]`);
+    if (editBtn) editBtn.addEventListener('click', () => openEmployeeModal(u));
+    const deactBtn = view.querySelector(`[data-deactivate="${u.id}"]`);
+    if (deactBtn) deactBtn.addEventListener('click', async () => {
+      if (!confirm(`¿Desactivar a "${u.name}"? No podrá iniciar sesión.`)) return;
+      await api('PUT', `/api/employees/${u.id}`, { active: false });
+      toast('Empleado desactivado');
+      renderEmpleados(view);
+    });
+  });
+}
+
+function openEmployeeModal(employee) {
+  const isEdit = !!employee;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal">
+      <h3>${isEdit ? 'Editar empleado' : 'Nuevo empleado'}</h3>
+      <form id="employee-form">
+        <label>Nombre completo</label>
+        <input type="text" id="e-name" required value="${employee ? escapeHtml(employee.name) : ''}" />
+        <label>Usuario</label>
+        <input type="text" id="e-username" required ${isEdit ? 'disabled' : ''} value="${employee ? escapeHtml(employee.username) : ''}" />
+        <label>${isEdit ? 'Nueva contraseña (dejar en blanco para no cambiar)' : 'Contraseña'}</label>
+        <input type="password" id="e-password" ${isEdit ? '' : 'required'} />
+        <label>Rol</label>
+        <select id="e-role">
+          <option value="employee" ${employee && employee.role === 'employee' ? 'selected' : ''}>Empleado</option>
+          <option value="admin" ${employee && employee.role === 'admin' ? 'selected' : ''}>Administrador</option>
+        </select>
+        <div class="form-row-actions">
+          <button type="button" class="btn secondary" id="cancel-modal" style="width:50%">Cancelar</button>
+          <button type="submit" class="btn" style="width:50%">Guardar</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#cancel-modal').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#employee-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const password = document.getElementById('e-password').value;
+    try {
+      if (isEdit) {
+        await api('PUT', `/api/employees/${employee.id}`, {
+          name: document.getElementById('e-name').value.trim(),
+          role: document.getElementById('e-role').value,
+          password: password || undefined
+        });
+      } else {
+        await api('POST', '/api/employees', {
+          name: document.getElementById('e-name').value.trim(),
+          username: document.getElementById('e-username').value.trim(),
+          password,
+          role: document.getElementById('e-role').value
+        });
+      }
+      backdrop.remove();
+      toast('Empleado guardado');
+      await loadReferenceData();
+      renderEmpleados(document.getElementById('view'));
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
+boot();
